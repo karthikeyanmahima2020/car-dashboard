@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Car tracker</title>
+<script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<style>
+  :root {
+    --paper: #eef3f6; --grid: #d3dfe6; --ink: #14313f; --muted: #5b7482;
+    --trail: #1f6f8b; --car: #e4572e; --ok: #2e7d4f; --bad: #b3402a;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 20px; background: var(--paper); color: var(--ink);
+         font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 20px;
+         max-width: 1100px; margin: 0 auto; }
+  h1 { grid-column: 1 / -1; font-size: 1.4rem; margin: 0; }
+  canvas { width: 100%; height: auto; display: block; background: #fff;
+           border: 1px solid var(--grid); border-radius: 6px; }
+  aside { display: flex; flex-direction: column; gap: 16px; }
+  dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; }
+  dt { color: var(--muted); }
+  dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+  #status { font-weight: 600; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); }
+  button { font: inherit; padding: 8px 12px; border: 1px solid var(--ink); background: transparent;
+           color: var(--ink); border-radius: 6px; cursor: pointer; }
+  button:hover { background: var(--ink); color: #fff; }
+  button:focus-visible { outline: 3px solid var(--trail); outline-offset: 2px; }
+  @media (max-width: 760px) { main { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Car tracker</h1>
+
+  <canvas id="floor" width="800" height="600" role="img"
+          aria-label="Top-down view of the floor with the car's live position and path"></canvas>
+
+  <aside>
+    <p id="status" aria-live="polite" class="bad">Connecting to broker...</p>
+    <dl>
+      <dt>Car ID</dt>        <dd id="id">-</dd>
+      <dt>x (across)</dt>    <dd id="x">-</dd>
+      <dt>y (down)</dt>      <dd id="y">-</dd>
+      <dt>Heading</dt>       <dd id="heading">-</dd>
+      <dt>Camera sees car</dt><dd id="seen">no</dd>
+    </dl>
+    <button id="clear" type="button">Clear path</button>
+  </aside>
+</main>
+
+<script>
+  // Free public cloud broker: no signup, no password. Anyone can read these messages, so keep them harmless.
+  const BROKER = "wss://broker.hivemq.com:8884/mqtt";
+  const TOPIC_PREFIX = "amrita-iot-car-demo-7391";   // must match tracker.py and fake_car.py exactly
+
+  // Only for a private broker that needs a login. Leave both empty for the public one.
+  const USERNAME = "";
+  const PASSWORD = "";
+
+  const canvas = document.getElementById("floor");
+  const ctx = canvas.getContext("2d");
+  const $ = id => document.getElementById(id);
+  const css = getComputedStyle(document.documentElement);
+  const color = name => css.getPropertyValue(name).trim();
+
+  let trail = [], last = null, lastSeen = 0, sized = false;
+
+  function setStatus(text, ok) {
+    const s = $("status");
+    s.textContent = text;
+    s.className = ok ? "ok" : "bad";
+  }
+
+  const client = mqtt.connect(BROKER, USERNAME ? { username: USERNAME, password: PASSWORD } : {});
+  client.on("connect", () => { client.subscribe(`${TOPIC_PREFIX}/car/+/pose`); setStatus("Connected, waiting for car", true); });
+  client.on("close", () => setStatus("Broker not reachable at " + BROKER, false));
+
+  client.on("message", (topic, payload) => {
+    const d = JSON.parse(payload.toString());
+    if (!sized) {                       // match the canvas shape to the camera picture
+      canvas.height = Math.round(canvas.width * d.h / d.w);
+      sized = true;
+    }
+    last = d;
+    lastSeen = Date.now();
+    trail.push([d.x * canvas.width, d.y * canvas.height]);
+    if (trail.length > 300) trail.shift();
+    $("id").textContent = d.id;
+    $("x").textContent = d.x.toFixed(3);
+    $("y").textContent = d.y.toFixed(3);
+    $("heading").textContent = d.heading.toFixed(0) + "\u00b0";
+  });
+
+  $("clear").addEventListener("click", () => { trail = []; });
+
+  function draw() {
+    const W = canvas.width, H = canvas.height, step = W / 10;
+    ctx.clearRect(0, 0, W, H);
+
+    ctx.strokeStyle = color("--grid");
+    ctx.lineWidth = 1;
+    for (let x = 0; x <= W; x += step) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+    for (let y = 0; y <= H; y += step) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+
+    if (trail.length > 1) {
+      ctx.strokeStyle = color("--trail");
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      trail.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+      ctx.stroke();
+    }
+
+    const visible = last && Date.now() - lastSeen < 1500;
+    $("seen").textContent = visible ? "yes" : "no";
+    if (visible) {
+      ctx.save();
+      ctx.translate(last.x * W, last.y * H);
+      ctx.rotate(last.heading * Math.PI / 180);
+      ctx.fillStyle = color("--car");
+      ctx.beginPath();
+      ctx.moveTo(26, 0); ctx.lineTo(-16, -16); ctx.lineTo(-16, 16);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+    requestAnimationFrame(draw);
+  }
+  draw();
+</script>
+</body>
+</html>
